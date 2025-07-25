@@ -1,0 +1,14 @@
+[package]
+name = "mplib.extension"
+version = "1.0.0"
+title = "Franka Pick-and-Place Task"
+description = "Pick and place using MPLib with Franka in Isaac Sim"
+category = "Isaac Tasks"
+readme = ""
+
+[[python.module]]
+name = "MPlib_extension"
+path = "python"
+
+[dependencies]
+"isaacsim.examples.interactive" = "*"

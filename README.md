@@ -1,11 +1,9 @@
 # TacslExtensions
 Custom extensions made for Isaac Sim.
-
-#
-## MPLib Example
+## MPlib Example
 Clone repo into desired location. Once it has been cloned, create symlink into the `exts/` in your Isaac Sim installation directory.
 ```
-ln -s /path/to/MPLib_extension/exts ~/isaacsim-4.5.0/exts/MPLib_extension
+ln -s /path/to/MPlib_extension/exts ~/isaacsim-4.5.0/exts/MPlib_extension
 ```
 
 Once you've done that, run Isaac Sim GUI from terminal.
