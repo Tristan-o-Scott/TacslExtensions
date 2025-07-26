@@ -1,0 +1,26 @@
+robot_description: ./urdf/panda/franka_panda_mplib.urdf
+robot_description_semantic: ./urdf/panda/franka_panda.srdf
+
+group_name: "panda_hand"
+
+planning:
+  planning_group: "panda_arm"
+  planning_time: 5.0
+  max_velocity_scaling_factor: 0.1
+  max_acceleration_scaling_factor: 0.1
+
+collision_detection: true
+self_collision: true
+
+use_package_paths: true
+package_paths:
+  - ./urdf/panda
+mesh_directory: ./urdf/panda/franka_description/meshes
+
+robot_state:
+  joint_state:
+    position: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+
+joint_filter:
+  panda_finger_joint1: false
+  panda_finger_joint2: false
