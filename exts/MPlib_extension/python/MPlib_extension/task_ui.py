@@ -2,16 +2,14 @@ import os
 import omni.ext
 import asyncio
 import omni.ui as ui
-
 from MPlib_extension.pickplace import MyTaskRunner
 from isaacsim.gui.components.ui_utils import btn_builder
 from isaacsim.examples.browser import get_instance as get_browser_instance
 from isaacsim.examples.interactive.base_sample import BaseSampleUITemplate
 
-
 class MPlibExtension(omni.ext.IExt):
     def on_startup(self, ext_id: str):
-        self.example_name = "Franka Pick-and-Place (WIP for MPLib)"
+        self.example_name = "Franka Pick-and-Place"
         self.category = "[!] Custom Examples"
 
         ui_kwargs = {
@@ -19,7 +17,7 @@ class MPlibExtension(omni.ext.IExt):
             "file_path": os.path.abspath(__file__),
             "title": "Franka Pick-and-Place Task",
             "doc_link": "",
-            "overview": "Spawns a Franka arm and runs a pick-and-place demo using RRT motion planning [WIP for using MPlib in the future].",
+            "overview": "Spawns a Franka arm and runs a pick-and-place demo using MPlib for motion planning.",
             "sample": MyTaskRunner(),
         }
 
@@ -34,7 +32,6 @@ class MPlibExtension(omni.ext.IExt):
 
     def on_shutdown(self):
         get_browser_instance().deregister_example(name=self.example_name, category=self.category)
-        print("[DEBUG] MPlibExtension.on_shutdown called")
 
 class MPlibUI(BaseSampleUITemplate):
     def __init__(self, *args, **kwargs):
@@ -47,13 +44,24 @@ class MPlibUI(BaseSampleUITemplate):
                     btn = btn_builder(
                         label="Run Pick-and-Place",
                         text="Run",
-                        tooltip="Pick and place using RRT planner",
+                        tooltip="Pick and place using MPlib planner",
                         on_clicked_fn=self._on_pick_and_place,
                     )
                     btn.enabled = True
 
+                    btn2 = btn_builder(
+                        label="Test MPLib",
+                        text="Run Test",
+                        tooltip="Moves the robot to a test pose using MPLib, checks installation.",
+                        on_clicked_fn=self._on_mplib_test,
+                    )
+                    btn2.enabled = True
+
 
     def _on_pick_and_place(self):
         asyncio.ensure_future(self.sample._on_follow_target_event_async())
-    
+
+    def _on_mplib_test(self):
+        asyncio.ensure_future(self.sample.test_mplib_plan_and_execute())
+
 

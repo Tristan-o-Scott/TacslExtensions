@@ -1,144 +1,103 @@
-import os
-from typing import Optional
 
+import sys
 import carb
-import isaacsim.core.api.objects
-import isaacsim.robot_motion.motion_generation.interface_config_loader as interface_config_loader
 import numpy as np
-import omni.kit
-from isaacsim.core.api.controllers.base_controller import BaseController
+from pathlib import Path
+from typing import Optional
+import isaacsim.core.api.objects
 from isaacsim.core.prims import SingleArticulation
 from isaacsim.core.utils.types import ArticulationAction
-from isaacsim.robot_motion.motion_generation import ArticulationTrajectory
-from isaacsim.robot_motion.motion_generation.lula import RRT
-from isaacsim.robot_motion.motion_generation.lula.trajectory_generator import LulaCSpaceTrajectoryGenerator
-from isaacsim.robot_motion.motion_generation.path_planner_visualizer import PathPlannerVisualizer
-from isaacsim.robot_motion.motion_generation.path_planning_interface import PathPlanner
+from isaacsim.core.api.controllers.base_controller import BaseController
 
+# import MPlib
+# add Isaac Sim's Python site-packages dynamically
+this_file = Path(__file__).resolve()
+isaacsim_root = this_file
+while isaacsim_root.name != "isaacsim-4.5.0":
+    isaacsim_root = isaacsim_root.parent
+site_packages = isaacsim_root / "kit" / "python" / "lib" / f"python{sys.version_info.major}.{sys.version_info.minor}" / "site-packages"
 
-class MyRRTController(BaseController):
-    def __init__(
-        self,
-        name: str,
-        path_planner_visualizer: PathPlannerVisualizer,
-        cspace_trajectory_generator: LulaCSpaceTrajectoryGenerator,
-        physics_dt=1 / 60.0,
-        rrt_interpolation_max_dist=0.01,
-    ):
-        BaseController.__init__(self, name)
+if site_packages.exists() and str(site_packages) not in sys.path:
+    sys.path.append(str(site_packages))
 
-        self._robot = path_planner_visualizer.get_robot_articulation()
+from mplib import Planner, Pose
 
-        self._cspace_trajectory_generator = cspace_trajectory_generator
-        self._path_planner = path_planner_visualizer.get_path_planner()
-        self._path_planner_visualizer = path_planner_visualizer
+ext_root = this_file.parents[2] # Goes to MPlib_extension/
+urdf_path = ext_root / "assets/urdf/panda/franka_panda.urdf"
+srdf_path = ext_root / "assets/urdf/panda/franka_panda.srdf"
 
-        self._last_solution = None
-        self._action_sequence = None
-
+class FrankaMplibController(BaseController):
+    def __init__(self, name: str, robot_articulation: SingleArticulation, physics_dt=1/60.0):
+        super().__init__(name)
+        self._robot = robot_articulation
         self._physics_dt = physics_dt
-        self._rrt_interpolation_max_dist = rrt_interpolation_max_dist
+        self._planner = Planner(
+            urdf=str(urdf_path),
+            move_group="panda_hand",
+            srdf=str(srdf_path),
+            verbose=False
+        )
+        self._action_sequence = []
+        self._last_solution = None
 
-    def _convert_rrt_plan_to_trajectory(self, rrt_plan):
-        interpolated_path = self._path_planner_visualizer.interpolate_path(rrt_plan, self._rrt_interpolation_max_dist)
+    def _make_new_plan(self, target_pos, target_orn=None, finger_override=None):
+        if self._robot is None:
+            print("Robot articulation not set.")
+            return []
+
+        current_joints = self._robot.get_joint_positions() 
+        finger_q = np.array(finger_override) if finger_override is not None else current_joints[7:]
+    
+        # Use MPLib IK to find a goal joint config
+        goal_pose = Pose(
+            p=np.array(target_pos).reshape(3, 1),
+            q=np.array(target_orn).reshape(4, 1)
+        )
+
+        status, q_goals = self._planner.IK(goal_pose=goal_pose, start_qpos=current_joints)
+        if status != "Success" or q_goals is None:
+            print("[MPLib] IK failed!")
+            return None
         
-        trajectory = self._cspace_trajectory_generator.compute_c_space_trajectory(interpolated_path)
+        plan_result = self._planner.plan_pose(goal_pose, current_joints.tolist())
+        if plan_result.get("status", "") != "Success" or len(plan_result.get("position", [])) == 0:
+            carb.log_warn("MPLib failed to find path.")
+            return None
+        
+        actions = []
 
-        art_trajectory = ArticulationTrajectory(self._robot, trajectory, self._physics_dt)
-        actions = art_trajectory.get_action_sequence()
+        # Linearly interpolate joint positions over time
+        positions = plan_result["position"]
+        num_points = len(positions)
+        if num_points < 2:
+            print("[MPLib] Not enough points to interpolate.")
+            return []
+
+        for i in range(num_points - 1):
+            start = np.array(positions[i])
+            end = np.array(positions[i + 1])
+            step_size = 0.1
+            num_steps = max(2, min(20, int(np.ceil(np.linalg.norm(end - start) / step_size))))
+
+            for alpha in np.linspace(0, 1, num_steps):
+                interp = (1 - alpha) * start + alpha * end
+                full_q = np.concatenate([interp, finger_q])
+                actions.append(ArticulationAction(joint_positions=full_q))
+
+        self._action_sequence = actions
+        self._last_solution = actions[-1].joint_positions if actions else None
         return actions
 
-    def _make_new_plan(
-        self, target_end_effector_position: np.ndarray, target_end_effector_orientation: Optional[np.ndarray] = None
-    ) -> None:
-        self._path_planner.set_end_effector_target(target_end_effector_position, target_end_effector_orientation)
-        self._path_planner.update_world()
+    def forward(self, target_end_effector_position: np.ndarray, target_end_effector_orientation: Optional[np.ndarray] = None) -> ArticulationAction:
+        if not self._action_sequence:
+            self._action_sequence = self._make_new_plan(target_end_effector_position, target_end_effector_orientation)
+            if not self._action_sequence:
+                return ArticulationAction()
 
-        path_planner_visualizer = PathPlannerVisualizer(self._robot, self._path_planner)
-        active_joints = path_planner_visualizer.get_active_joints_subset()
-        if self._last_solution is None:
-            start_pos = active_joints.get_joint_positions()
-        else:
-            start_pos = self._last_solution
+        action = self._action_sequence.pop(0)
+        return action
 
-        self._path_planner.set_max_iterations(5000)
-        self._rrt_plan = self._path_planner.compute_path(start_pos, np.array([]))
-
-        if self._rrt_plan is None or len(self._rrt_plan) <= 1:
-            carb.log_warn("No plan could be generated to target pose: " + str(target_end_effector_position))
-            self._action_sequence = []
-            return
-
-        print(len(self._rrt_plan))
-
-        self._action_sequence = self._convert_rrt_plan_to_trajectory(self._rrt_plan)
-        self._last_solution = self._action_sequence[-1].joint_positions
-
-    def forward(
-        self, target_end_effector_position: np.ndarray, target_end_effector_orientation: Optional[np.ndarray] = None
-    ) -> ArticulationAction:
-        if self._action_sequence is None:
-            # This will only happen the first time the forward function is used
-            self._make_new_plan(target_end_effector_position, target_end_effector_orientation)
-
-        if len(self._action_sequence) == 0:
-            # The plan is completed; return null action to remain in place
-            return ArticulationAction()
-
-        return self._action_sequence.pop(0)
-
-    def add_obstacle(self, obstacle: isaacsim.core.api.objects, static: bool = False) -> None:
-        self._path_planner.add_obstacle(obstacle, static)
-
-    def remove_obstacle(self, obstacle: isaacsim.core.api.objects) -> None:
-        self._path_planner.remove_obstacle(obstacle)
-
-    def reset(self) -> None:
-        # PathPlannerController will make one plan per reset
-        self._path_planner.reset()
-        self._action_sequence = None
-        self._last_solution = None
-
-    def get_path_planner(self) -> PathPlanner:
-        return self._path_planner
+    def reset(self):
+        self._action_sequence = []
 
 
-class FrankaRrtController(MyRRTController):
-    def __init__(
-        self,
-        name,
-        robot_articulation: SingleArticulation,
-    ):
-        ext_manager = omni.kit.app.get_app().get_extension_manager()
-        ext_id = ext_manager.get_enabled_extension_id("isaacsim.examples.interactive")
-        examples_extension_path = ext_manager.get_extension_path(ext_id)
-
-        # Load default RRT config files stored in the isaacsim.robot_motion.motion_generation extension
-        rrt_config = interface_config_loader.load_supported_path_planner_config("Franka", "RRT")
-
-        # Replace the default robot description file with a copy that has inflated collision spheres
-        rrt_config["robot_description_path"] = os.path.join(
-            examples_extension_path,
-            "isaacsim",
-            "examples",
-            "interactive",
-            "path_planning",
-            "path_planning_example_assets",
-            "franka_conservative_spheres_robot_description.yaml",
-        )
-        rrt = RRT(**rrt_config)
-
-        # Create a trajectory generator to convert RRT cspace waypoints to trajectories
-        cspace_trajectory_generator = LulaCSpaceTrajectoryGenerator(
-            rrt_config["robot_description_path"], rrt_config["urdf_path"]
-        )
-
-        # It is important that the Robot Description File includes optional Jerk and Acceleration limits so that the generated trajectory
-        # can be followed closely by the simulated robot Articulation
-        for i in range(len(rrt.get_active_joints())):
-            assert cspace_trajectory_generator._lula_kinematics.has_c_space_acceleration_limit(i)
-            assert cspace_trajectory_generator._lula_kinematics.has_c_space_jerk_limit(i)
-
-        visualizer = PathPlannerVisualizer(robot_articulation, rrt)
-
-        MyRRTController.__init__(self, name, visualizer, cspace_trajectory_generator)

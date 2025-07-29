@@ -1,13 +1,12 @@
 from isaacsim.examples.interactive.base_sample import BaseSample
 from omni.isaac.core.utils.rotations import euler_angles_to_quat
+from MPlib_extension.controller import FrankaMplibController
 from omni.isaac.core.utils.types import ArticulationAction
-from MPlib_extension.controller import FrankaRrtController
+from pxr import Usd, UsdShade, UsdPhysics, Sdf, Gf
 from omni.isaac.core.objects import DynamicCuboid
 from MPlib_extension.task import FrankaTask
-from pxr import PhysxSchema
 import numpy as np
 import asyncio
-
 
 class MyTaskRunner(BaseSample):
     def __init__(self) -> None:
@@ -18,23 +17,27 @@ class MyTaskRunner(BaseSample):
     def setup_scene(self):
         world = self.get_world()
         scene = world.scene
+        stage = world.stage
 
-        table = scene.add(
+        # add table
+        scene.add(
             DynamicCuboid(
                 prim_path="/World/table",
                 name="table",
-                position=np.array([0.5, 0.0, 0.0]),
+                position=np.array([0.5, 0.0, 0.025]),
                 scale=np.array([0.8, 0.8, 0.05]),    
                 color=np.array([0.5, 0.3, 0.1]),
                 mass=0.0     
             )
         )
 
+        # add franka task
         task = FrankaTask("Plan To Target Task", enable_target_cube=False)
         world.add_task(task)
-
         self._franka_task = task
+        self._franka = task.get_franka_robot()
 
+        # add blocks
         self.blocks = []
         block_positions = [
             np.array([0.4, 0.3, 0.06]),
@@ -46,33 +49,74 @@ class MyTaskRunner(BaseSample):
             np.array([0.0, 1.0, 0.0]),
             np.array([0.0, 0.0, 1.0]),
         ]
-
         block_heights = [0.12, 0.08, 0.14]
+
+        def create_physics_material(stage, material_path, static_friction, dynamic_friction, restitution, color):
+            # Create a new Material prim at the given path
+            material_prim = stage.DefinePrim(material_path, "PhysicsMaterial")
+
+            # physical material properties
+            material_api = UsdPhysics.MaterialAPI.Apply(material_prim)
+            material_api.CreateStaticFrictionAttr().Set(static_friction)
+            material_api.CreateDynamicFrictionAttr().Set(dynamic_friction)
+            material_api.CreateRestitutionAttr().Set(restitution)
+
+            # visual properties for the blocks (for colors and appearance)
+            usd_material = UsdShade.Material.Define(stage, material_path)
+            shader_path = material_path + "/Shader"
+            shader = UsdShade.Shader.Define(stage, shader_path)
+            shader.CreateIdAttr("UsdPreviewSurface")
+            shader.CreateInput("diffuseColor", Sdf.ValueTypeNames.Color3f).Set(Gf.Vec3f(*color))
+            shader.CreateInput("roughness", Sdf.ValueTypeNames.Float).Set(0.3)
+            shader.CreateInput("metallic", Sdf.ValueTypeNames.Float).Set(0.0)
+            shader_output = shader.CreateOutput("surface", Sdf.ValueTypeNames.Token)
+
+            # bind shader to material
+            usd_material.CreateSurfaceOutput().ConnectToSource(shader_output)
+
+            return material_prim
+
+        def bind_material_to_prim(stage, prim, material_path):
+            material_prim = stage.GetPrimAtPath(material_path)
+            if not material_prim:
+                print(f"[ERROR] Material {material_path} does not exist.")
+                return
+            material = UsdShade.Material(material_prim)
+            UsdShade.MaterialBindingAPI(prim).Bind(material)   
+
         for i in range(3):
             height = block_heights[i]
             pos = block_positions[i]
             pos[2] = 0.5 * height
+            
             block = scene.add(
                 DynamicCuboid(
                     prim_path=f"/World/cube_{i+1}",
                     name=f"cube_{i+1}",
                     position=pos,
                     scale=np.array([0.04, 0.04, height]),
-                    color=block_colors[i],
-                    mass=0.1,
+                    mass=0.04
                 )
             )
-            self.blocks.append(block)
 
+            material_prim_path = f"/World/Materials/HighFrictionBlock_{i+1}"
+            if not stage.GetPrimAtPath(material_prim_path):
+                create_physics_material(
+                    stage,
+                    material_path=material_prim_path,
+                    static_friction=200.0,
+                    dynamic_friction=10.0,
+                    restitution=0.0,
+                    color=block_colors[i]
+                )
+    
             cube_prim = world.stage.GetPrimAtPath(block.prim_path)
-            physx_api = PhysxSchema.PhysxRigidBodyAPI.Apply(cube_prim)
-            #physx_api.CreateDisableGravityAttr(True)
-        return
+            bind_material_to_prim(stage, cube_prim, material_prim_path)
+            # physx_api.CreateDisableGravityAttr(False)
 
+            self.blocks.append(block)     
+        
     async def setup_pre_reset(self):
-        world = self.get_world()
-        if world.physics_callback_exists("sim_step"):
-            world.remove_physics_callback("sim_step")
         self._controller.reset()
         return
 
@@ -84,17 +128,58 @@ class MyTaskRunner(BaseSample):
         self._franka_task = list(self._world.get_current_tasks().values())[0]
         self._task_params = self._franka_task.get_params()
 
-        my_franka = self._world.scene.get_object(self._task_params["robot_name"]["value"])
-        self._robot = my_franka
-        my_franka.disable_gravity()
+        self._robot = self._world.scene.get_object(self._task_params["robot_name"]["value"])
+        self._robot.disable_gravity()
+        self._articulation_controller = self._robot.get_articulation_controller()
+        if self._articulation_controller is None:
+            print("Waiting for articulation controller to initialize...")
+            await asyncio.sleep(0.1)
+            self._articulation_controller = self._robot.get_articulation_controller()
 
-        self._controller = FrankaRrtController(name="franka_rrt_controller", robot_articulation=my_franka)
-        self._articulation_controller = my_franka.get_articulation_controller()
-        
+        self._articulation_controller.switch_control_mode("position")
+        self._controller = FrankaMplibController("mplib_controller", self._robot, physics_dt=1 / 60.0)
+
+        kps, kds = self._franka_task.get_custom_gains()
+        self._articulation_controller.set_gains(kps=kps, kds=kds)
+
         self._finger_joint_names = ["panda_finger_joint1", "panda_finger_joint2"]
         self._finger_indices = [self._robot.dof_names.index(j) for j in self._finger_joint_names]
 
+        if not self._world.physics_callback_exists("sim_step"):
+            self._world.add_physics_callback("sim_step", self._on_sim_step)
         return
+
+    async def test_mplib_plan_and_execute(self):
+        # Test MPLib motion planning and execution by clicking test button (test this on first run)
+        print("[TEST] Starting MPLib motion test...")
+        # 1. Ensure robot is ready
+        self._robot.set_joint_positions(np.array([0.0, -0.4, 0.0, -1.0, 0.0, 1.0, 0.7, 0.04, 0.04]))
+        await asyncio.sleep(0.3)
+
+        # 2. Build controller
+        controller = FrankaMplibController("test_mplib", self._robot)
+        self._articulation_controller.switch_control_mode("position")
+
+        # 3. Set target pose
+        target_pos = np.array([0.5, 0.0, 0.3])
+        target_orn = euler_angles_to_quat(np.array([np.pi, 0, 0]))
+
+        # 4. Call plan function
+        actions = controller._make_new_plan(target_pos, target_orn)
+
+        if not actions:
+            print("[ERROR] MPLib failed to generate a plan.")
+            return
+
+        # 5. Execute plan
+        for i, action in enumerate(actions):
+            if action.joint_positions is None:
+                print(f"[ERROR] Action {i} has no joint positions.")
+                continue
+            self._articulation_controller.apply_action(action)
+            await asyncio.sleep(1.0 / 60.0)
+            
+        print("[TEST] MPLib motion test complete.")
 
     async def _on_follow_target_event_async(self):
         world = self.get_world()
@@ -108,18 +193,13 @@ class MyTaskRunner(BaseSample):
             print(f"[INFO] Planning pick and place for block {i+1}")
             
             block_pos, _ = block.get_world_pose()
+            block_height = block.get_local_scale()[2]
 
-            # Compute grasping and placement poses
-            block_scale = block.get_local_scale()
-            block_height = block_scale[2]
-
-            grasp_z_offset = 0.25 * block_height + 0.01
-            grasp = block_pos + np.array([0, 0, grasp_z_offset])
+            grasp_z_offset = 0.25 * block_height + 0.105
+            grasp = block_pos + np.array([0.0, 0.0, grasp_z_offset])
             above = grasp + np.array([0, 0, 0.15])
-
-            place = block_pos + np.array([0.05, 0.0, grasp_z_offset])
+            place = block_pos + np.array([0.05, 0.0, grasp_z_offset ])
             place_above = place + np.array([0, 0, 0.10])
-
             orientation = euler_angles_to_quat(np.array([np.pi, 0, 0]))
 
             try:
@@ -152,33 +232,36 @@ class MyTaskRunner(BaseSample):
                 print(f"[INFO] Grasping block {i+1}")
                 joint_positions = list(self._robot.get_joint_positions())
                 for idx in self._finger_indices:
-                    joint_positions[idx] = 0.001
+                    joint_positions[idx] = 0.0
                 self._articulation_controller.apply_action(ArticulationAction(joint_positions=joint_positions))
                 await asyncio.sleep(0.5)
 
                 # --- 5. Lift back to hover ---
                 self._controller.reset()
-                self._controller._make_new_plan(above, orientation)
+                closed_fingers = [0.001, 0.001]
+                self._controller._make_new_plan(above, orientation, finger_override=closed_fingers)
                 while self._controller._action_sequence:
                     action = self._controller.forward(above, orientation)
                     self._articulation_controller.apply_action(action)
-                    await asyncio.sleep(1.0 / 60.0)
+                    await asyncio.sleep(1.0 / 40.0)
 
                 # --- 6. Move above placement ---
                 self._controller.reset()
-                self._controller._make_new_plan(place_above, orientation)
+                closed_fingers = [0.001, 0.001]
+                self._controller._make_new_plan(place_above, orientation, finger_override=closed_fingers)
                 while self._controller._action_sequence:
                     action = self._controller.forward(place_above, orientation)
                     self._articulation_controller.apply_action(action)
-                    await asyncio.sleep(1.0 / 60.0)
+                    await asyncio.sleep(1.0 / 40.0)
 
                 # --- 7. Move down to place ---
                 self._controller.reset()
-                self._controller._make_new_plan(place, orientation)
+                closed_fingers = [0.001, 0.001]
+                self._controller._make_new_plan(place, orientation, finger_override=closed_fingers)
                 while self._controller._action_sequence:
                     action = self._controller.forward(place, orientation)
                     self._articulation_controller.apply_action(action)
-                    await asyncio.sleep(1.0 / 60.0)
+                    await asyncio.sleep(1.0 / 40.0)
 
                 # --- 8. Open gripper to release ---
                 print(f"[INFO] Releasing block {i+1}")
@@ -195,15 +278,22 @@ class MyTaskRunner(BaseSample):
                     action = self._controller.forward(place_above, orientation)
                     self._articulation_controller.apply_action(action)
                     await asyncio.sleep(1.0 / 60.0)
-
+                    
             except Exception as e:
                 print(f"[ERROR] Failed to pick and place block {i+1}: {e}")
                 continue
+
+    def _on_sim_step(self, step_size):
+        if self._controller is None:
+            kps, kds = self._franka_task.get_custom_gains()
+            self._articulation_controller.set_gains(kps, kds)
+        return
 
     def _pass_world_state_to_controller(self):
         self._controller.reset()
         for wall in self._franka_task.get_obstacles():
             self._controller.add_obstacle(wall)
+        return
 
     def _on_follow_target_simulation_step(self, step_size):
         observations = self._world.get_observations()
@@ -217,16 +307,12 @@ class MyTaskRunner(BaseSample):
         return
 
     def _on_add_wall_event(self):
-        world = self.get_world()
-        current_task = list(world.get_current_tasks().values())[0]
-        cube = current_task.add_obstacle()
+        self.get_world().get_current_tasks().values().__iter__().__next__().add_obstacle()
         return
 
     def _on_remove_wall_event(self):
-        world = self.get_world()
-        current_task = list(world.get_current_tasks().values())[0]
-        obstacle_to_delete = current_task.get_obstacle_to_delete()
-        current_task.remove_obstacle()
+        task = self.get_world().get_current_tasks().values().__iter__().__next__()
+        task.remove_obstacle()
         return
 
     def _on_logging_event(self, val):

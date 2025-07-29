@@ -2,7 +2,7 @@ from collections import OrderedDict
 from typing import List, Optional, Tuple
 
 import numpy as np
-from isaacsim.core.api.objects import FixedCuboid, VisualCuboid
+from isaacsim.core.api.objects import VisualCuboid
 from isaacsim.core.api.scenes.scene import Scene
 from isaacsim.core.api.tasks import BaseTask
 from isaacsim.core.prims import SingleXFormPrim
@@ -42,6 +42,7 @@ class MyPathPlanningTask(BaseTask):
     def set_up_scene(self, scene: Scene) -> None:
         super().set_up_scene(scene)
         scene.add_default_ground_plane()
+
         if self._target_orientation is None:
             self._target_orientation = euler_angles_to_quat(np.array([-np.pi, 0, np.pi]))
         if self._target_prim_path is None:
@@ -52,6 +53,7 @@ class MyPathPlanningTask(BaseTask):
             self._target_name = find_unique_string_name(
                 initial_name="target", is_unique_fn=lambda x: not self.scene.object_exists(x)
             )
+
         self.set_params(
             target_prim_path=self._target_prim_path,
             target_position=self._target_position,
@@ -61,7 +63,6 @@ class MyPathPlanningTask(BaseTask):
         self._robot = self.set_robot()
         scene.add(self._robot)
         self._task_objects[self._robot.name] = self._robot
-
         self._move_task_objects_to_their_frame()
         return
 
@@ -120,6 +121,9 @@ class MyPathPlanningTask(BaseTask):
 
     def get_observations(self) -> dict:
         joints_state = self._robot.get_joints_state()
+        if joints_state is None:
+            return {}
+        
         observations = {
             self._robot.name: {
                 "joint_positions": np.array(joints_state.positions),
@@ -134,9 +138,6 @@ class MyPathPlanningTask(BaseTask):
                 "orientation": np.array(target_orientation),
             }
 
-        if "cube_1" in self._task_objects:
-            pos, rot = self._task_objects["cube_1"].get_world_pose()
-            observations["cube_1"] = {"position": pos, "orientation": rot}
 
         return observations
 
@@ -212,7 +213,7 @@ class MyPathPlanningTask(BaseTask):
         return
 
     def get_custom_gains(self) -> Tuple[np.array, np.array]:
-        return None, None
+        return None, None  # Use default gains
 
 
 class FrankaTask(MyPathPlanningTask):
@@ -253,6 +254,7 @@ class FrankaTask(MyPathPlanningTask):
             )
         self._franka = Franka(prim_path=self._franka_prim_path, name=self._franka_robot_name)
         return self._franka
+    
+    def get_franka_robot(self):
+        return self._franka
 
-    def get_custom_gains(self) -> Tuple[np.array, np.array]:
-        return (1e15 * np.ones(9), 1e13 * np.ones(9))
