@@ -13,7 +13,7 @@ class MassThrowTaskRunner(BaseSample):
         super().__init__()
         self._controller = None
         self._articulation_controller = None
-        self._gripper_closed = np.array([0.0115, 0.0115])
+        self._gripper_closed = np.array([0.01, 0.01])
         self._gripper_open = np.array([0.04, 0.04])
         self._ready_to_throw = False
         self._finger_joint_names = ["panda_finger_joint1", "panda_finger_joint2"]
@@ -58,6 +58,7 @@ class MassThrowTaskRunner(BaseSample):
             np.array([0.0, 0.0, 1.0]),
         ]
 
+        # max payload for franka is 3 kg, but blocks over 0.2 kg struggle
         block_masses = [0.05, 0.08, 0.1] # kg
 
         def create_physics_material(stage, material_path, static_friction, dynamic_friction, restitution, color):
@@ -227,16 +228,15 @@ class MassThrowTaskRunner(BaseSample):
 
             target_scale = (target_x / 1.0) ** 2
 
-            k = 0.5 # scaling factor for mass influence on throw strength
-            m_ref = 0.1 # reference mass
-            mass_factor_raw = (m_ref / mass) ** 0.5 
+            # cap mass to range
+            m = float(np.clip(mass, 0.02, 0.2))
 
-            mass_factor = 1.0 + k * (mass_factor_raw - 1.0)
+            if m >= 0.1:
+                effort = 0.7
+            else:
+                effort = 1.4
 
-            # make caps to prevent extremely weak or strong throws
-            mass_factor = np.clip(mass_factor, 1.0, 1.8)
-
-            mass_scale = mass_factor * target_scale *  1.18
+            mass_scale = effort * target_scale * 1.8
 
             throw_direction = mass_scale * max_throw_direction
             if np.linalg.norm(throw_direction) > np.linalg.norm(max_throw_direction):
