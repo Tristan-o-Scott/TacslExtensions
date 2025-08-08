@@ -32,3 +32,8 @@ There should be a tab now in Robotics Examples at the very bottom titled `CUSTOM
 To test your installation of MPlib, try running `RUN TEST`. If you see the Franka arm moving, then MPlib is working correctly.
 
 To run the simulation, press the play button to the left before clicking on `RUN` in the Task Control window (bottom of the screen).
+
+# Block Throw Example
+The target zone for where the blocks are to be thrown to can be changed according to what is needed for testing.
+
+The blocks may not land within the target zone due to them slipping while thrown, the behavior of the physics, or the blocks not settling when being grasped.

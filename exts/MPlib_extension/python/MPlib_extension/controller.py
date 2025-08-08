@@ -39,6 +39,7 @@ class FrankaMplibController(BaseController):
         )
         self._action_sequence = []
         self._last_solution = None
+        self._fast_mode = False
 
     def _make_new_plan(self, target_pos, target_orn=None, finger_override=None):
         if self._robot is None:
@@ -56,12 +57,13 @@ class FrankaMplibController(BaseController):
 
         status, q_goals = self._planner.IK(goal_pose=goal_pose, start_qpos=current_joints)
         if status != "Success" or q_goals is None:
-            print("[MPLib] IK failed!")
+            print(f"[MPLib] IK failed for pose: {target_pos}, orientation: {target_orn}")
             return None
         
         plan_result = self._planner.plan_pose(goal_pose, current_joints.tolist())
-        if plan_result.get("status", "") != "Success" or len(plan_result.get("position", [])) == 0:
-            carb.log_warn("MPLib failed to find path.")
+        
+        if plan_result.get("status", "") != "Success":
+            print(f"[MPLib] plan_pose failed. Full result: {plan_result}")
             return None
         
         actions = []
@@ -69,15 +71,12 @@ class FrankaMplibController(BaseController):
         # Linearly interpolate joint positions over time
         positions = plan_result["position"]
         num_points = len(positions)
-        if num_points < 2:
-            print("[MPLib] Not enough points to interpolate.")
-            return []
 
         for i in range(num_points - 1):
             start = np.array(positions[i])
             end = np.array(positions[i + 1])
-            step_size = 0.1
-            num_steps = max(2, min(20, int(np.ceil(np.linalg.norm(end - start) / step_size))))
+            step_size = 1
+            num_steps = 1 if self._fast_mode else max(2, min(20, int(np.ceil(np.linalg.norm(end - start) / step_size))))
 
             for alpha in np.linspace(0, 1, num_steps):
                 interp = (1 - alpha) * start + alpha * end
@@ -96,6 +95,9 @@ class FrankaMplibController(BaseController):
 
         action = self._action_sequence.pop(0)
         return action
+    
+    def set_fast_mode(self, enable: bool):
+        self._fast_mode = enable
 
     def reset(self):
         self._action_sequence = []
