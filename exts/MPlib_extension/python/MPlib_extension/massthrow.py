@@ -2,7 +2,7 @@ from isaacsim.examples.interactive.base_sample import BaseSample
 from omni.isaac.core.utils.rotations import euler_angles_to_quat
 from MPlib_extension.controller import FrankaMplibController
 from omni.isaac.core.utils.types import ArticulationAction
-from omni.isaac.core.objects import DynamicCuboid
+from omni.isaac.core.objects import DynamicCuboid, DynamicCylinder
 from pxr import UsdShade, UsdPhysics, Sdf, Gf
 from omni.isaac.franka import Franka
 import numpy as np
@@ -13,7 +13,7 @@ class MassThrowTaskRunner(BaseSample):
         super().__init__()
         self._controller = None
         self._articulation_controller = None
-        self._gripper_closed = np.array([0.01, 0.01])
+        self._gripper_closed = np.array([0.001, 0.001])
         self._gripper_open = np.array([0.04, 0.04])
         self._ready_to_throw = False
         self._finger_joint_names = ["panda_finger_joint1", "panda_finger_joint2"]
@@ -36,11 +36,13 @@ class MassThrowTaskRunner(BaseSample):
 
         # add a target zone
         self.target_zone = scene.add(
-            DynamicCuboid(
+            DynamicCylinder(
                 prim_path="/World/target_zone",
                 name="target_zone",
-                position=np.array([0.8, 0.0, 0.01]),
-                scale=np.array([0.25, 1, 0.01]),
+                # 0.8 is a safe distance from the robot base
+                position=np.array([0.9, 0.0, 0.0]), #0.6 m is too close to the robot base
+                radius=0.15,
+                height=0.01,
                 color=np.array([1.0, 1.0, 1.0]),
                 mass=0.0
             )
@@ -58,7 +60,7 @@ class MassThrowTaskRunner(BaseSample):
             np.array([0.0, 0.0, 1.0]),
         ]
 
-        # max payload for franka is 3 kg, but blocks over 0.2 kg struggle
+        # max payload for franka is 3 kg, but blocks over or = 0.2 kg struggle
         block_masses = [0.05, 0.08, 0.1] # kg
 
         def create_physics_material(stage, material_path, static_friction, dynamic_friction, restitution, color):
@@ -113,7 +115,7 @@ class MassThrowTaskRunner(BaseSample):
                     stage,
                     material_path=material_prim_path,
                     static_friction=2.5,
-                    dynamic_friction=1.0,
+                    dynamic_friction=2.5,
                     restitution=0.0,
                     color=block_colors[i]
                 )
@@ -216,11 +218,23 @@ class MassThrowTaskRunner(BaseSample):
             pos, _ = block.get_world_pose()
             height = block.get_local_scale()[2]
 
-            grasp = pos + np.array([0.0, 0.0, 0.5 * height + 0.09])
+            # cap mass to range
+            m = float(np.clip(mass, 0.02, 0.2))
+
+            if m > 0.08:
+                grasp = pos + np.array([0.0, 0.0, 0.5 * height + 0.08])
+            elif m <= 0.05:
+                grasp = pos + np.array([0.0, 0.0, 0.5 * height + 0.1])
+            else:
+                grasp = pos + np.array([0.0, 0.0, 0.5 * height + 0.09])
+
             above = grasp + np.array([0.0, 0.0, 0.1])
             orientation = euler_angles_to_quat(np.array([np.pi, 0, 0]))
 
-            pre_throw = above
+            center_pose = np.array([0.45, 0.0, above[2]])
+            pre_throw = center_pose
+
+            # cannot plan a path further than this distance
             max_throw_direction = np.array([0.32, 0.0, 0.17]) 
 
             target_pos, _ = self.target_zone.get_world_pose()
@@ -228,22 +242,30 @@ class MassThrowTaskRunner(BaseSample):
 
             target_scale = (target_x / 1.0) ** 2
 
-            # cap mass to range
-            m = float(np.clip(mass, 0.02, 0.2))
-
-            if m >= 0.1:
-                effort = 0.7
+            if target_x <= 0.8:
+                dist_effort = 0.5
             else:
-                effort = 1.4
+                dist_effort = 1.0
 
-            mass_scale = effort * target_scale * 1.8
+            # cap distance to range
+            dist_effort = float(np.clip(dist_effort, 0.6, 1.0))
 
-            throw_direction = mass_scale * max_throw_direction
+            if m > 0.08:
+                effort = 1.0
+            elif m == 0.1:
+                effort = 1.2
+            else:
+                effort = 1.5
+
+            mass_scale = effort * dist_effort * target_scale
+
+            throw_direction = max_throw_direction * mass_scale
             if np.linalg.norm(throw_direction) > np.linalg.norm(max_throw_direction):
                 throw_direction = throw_direction / np.linalg.norm(throw_direction) * np.linalg.norm(max_throw_direction)
             release_pose = pre_throw + throw_direction
 
             # --- 1. grasp block ---
+            self._controller.set_fast_mode(True)
             await self._follow_plan(above, orientation, self._gripper_open)
             await self._follow_plan(grasp, orientation, self._gripper_open)
 
@@ -258,28 +280,51 @@ class MassThrowTaskRunner(BaseSample):
 
             await asyncio.sleep(0.8)
             await self._follow_plan(above, orientation, self._gripper_closed)
-            await asyncio.sleep(0.2)
+
+            await self._follow_plan(center_pose, orientation, self._gripper_closed)
+            await asyncio.sleep(0.8)
 
             # --- 2. plan a single motion from pre_throw to release_pose ---
             self._controller.reset()
-            self._controller.set_fast_mode(True)
+
             self._controller._make_new_plan(release_pose, orientation, finger_override=self._gripper_closed)
             
             if not self._controller._action_sequence:
                 print("[ERROR] Failed to generate throw motion.")
                 return
             
-            release_index = int(0.5 * len(self._controller._action_sequence))
+            seq = self._controller._action_sequence
 
+            if m > 0.08:
+                release_frac = 0.4
+            elif m <= 0.05:
+                release_frac = 0.3
+            else:
+                release_frac = 0.5
+
+            release_index = max(1, int(release_frac * len(seq)))
+
+            released = False
+            
             # --- 3. execute motion quickly and open gripper during action ---
-            for i, action in enumerate(self._controller._action_sequence):
+            for i, action in enumerate(seq):
                 q = action.joint_positions.copy()
-                if i == release_index:
-                    q[-2:] = self._gripper_open
+
+                if i >= release_index:
+                    q[self._finger_indices[0]] = self._gripper_open[0]
+                    q[self._finger_indices[1]] = self._gripper_open[1]
+                    released = True
+
                 self._articulation_controller.apply_action(
                     ArticulationAction(joint_positions=q)
                 )
-                await asyncio.sleep(1.0 / 140.0)
+                await asyncio.sleep(1.0 / 160.0)
+
+            if not released:
+                q = self._franka.get_joint_positions()
+                q[self._finger_indices[0]] = self._gripper_open[0]
+                q[self._finger_indices[1]] = self._gripper_open[1]
+                self._articulation_controller.apply_action(ArticulationAction(joint_positions=q))
 
         self._controller.set_fast_mode(False)
         await self._follow_plan(above, orientation, self._gripper_open)
