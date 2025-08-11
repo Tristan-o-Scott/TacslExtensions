@@ -35,14 +35,16 @@ class MassThrowTaskRunner(BaseSample):
         self._init_franka_q = np.array([0.0, -0.6, 0.0, -2.4, 0.0, 1.8, 0.8] + self._gripper_open.tolist())
 
         # add a target zone
+        self.target_radius = 0.15
+        self.target_height = 0.01
         self.target_zone = scene.add(
             DynamicCylinder(
                 prim_path="/World/target_zone",
                 name="target_zone",
-                # 0.8 is a safe distance from the robot base
-                position=np.array([0.9, 0.0, 0.0]), #0.6 m is too close to the robot base
-                radius=0.15,
-                height=0.01,
+                # 0.8 m is a safe distance from the robot base, 0.9 m is the furthest that worked
+                position=np.array([0.8, 0.0, 0.5 * self.target_height]), #0.5 m is too close to the robot base
+                radius=self.target_radius,
+                height=self.target_height,
                 color=np.array([1.0, 1.0, 1.0]),
                 mass=0.0
             )
@@ -50,9 +52,9 @@ class MassThrowTaskRunner(BaseSample):
 
         # add blocks
         block_positions = [
-            np.array([0.4, -0.3, 0.02]),
-            np.array([0.4, 0.0, 0.02]),
-            np.array([0.4, 0.3, 0.02]),
+            np.array([0.4, -0.15, 0.02]),
+            np.array([0.4, 0.05, 0.02]),
+            np.array([0.4, 0.25, 0.02]),
         ]
         block_colors = [
             np.array([1.0, 0.0, 0.0]),
@@ -128,7 +130,6 @@ class MassThrowTaskRunner(BaseSample):
 
         self._init_block_poses = [blk.get_world_pose() for blk in self.blocks]
 
-
     async def setup_pre_reset(self):
         self._controller.reset()
         return        
@@ -175,12 +176,16 @@ class MassThrowTaskRunner(BaseSample):
     def check_if_block_in_target(self, block):
         block_pos, _ = block.get_world_pose()
         target_pos, _ = self.target_zone.get_world_pose()
-        target_extent = self.target_zone.get_local_scale() * 0.5
 
-        dx = abs(block_pos[0] - target_pos[0])
-        dy = abs(block_pos[1] - target_pos[1])
+        authoring_radius = self.target_radius
+        sx, sy, _ = self.target_zone.get_local_scale()
+        r = float(authoring_radius * max(sx, sy))
 
-        if dx < target_extent[0] and dy < target_extent[1]:
+        dx = float(block_pos[0] - target_pos[0])
+        dy = float(block_pos[1] - target_pos[1])
+        in_target = (dx*dx + dy*dy) <= (r * r)
+
+        if in_target:
             print(f"[SUCCESS] {block.name} landed in target.")
             return True
         else:
@@ -222,9 +227,9 @@ class MassThrowTaskRunner(BaseSample):
             m = float(np.clip(mass, 0.02, 0.2))
 
             if m > 0.08:
-                grasp = pos + np.array([0.0, 0.0, 0.5 * height + 0.08])
+                grasp = pos + np.array([0.0, 0.0, 0.5 * height + 0.075])
             elif m <= 0.05:
-                grasp = pos + np.array([0.0, 0.0, 0.5 * height + 0.1])
+                grasp = pos + np.array([0.0, 0.0, 0.5 * height + 0.085])
             else:
                 grasp = pos + np.array([0.0, 0.0, 0.5 * height + 0.09])
 
@@ -240,32 +245,34 @@ class MassThrowTaskRunner(BaseSample):
             target_pos, _ = self.target_zone.get_world_pose()
             target_x = target_pos[0]  # how far target is from origin
 
-            target_scale = (target_x / 1.0) ** 2
+            target_scale = (target_x / 1.0) ** 1.8
 
-            if target_x <= 0.8:
-                dist_effort = 0.5
+            if 0.6 < target_x < 0.8:
+                dist_effort = 0.9
+            elif target_x <= 0.6:
+                dist_effort = 0.8
             else:
-                dist_effort = 1.0
+                dist_effort = 0.95
 
             # cap distance to range
-            dist_effort = float(np.clip(dist_effort, 0.6, 1.0))
+            dist_effort = float(np.clip(dist_effort, 0.6, 1.6))
 
-            if m > 0.08:
-                effort = 1.0
-            elif m == 0.1:
-                effort = 1.2
+            if m > 0.1:
+                effort = 1.1
+            elif 0.065 < m <= 0.1:
+                effort = 1.3
             else:
-                effort = 1.5
+                effort = 1.2
 
             mass_scale = effort * dist_effort * target_scale
 
             throw_direction = max_throw_direction * mass_scale
             if np.linalg.norm(throw_direction) > np.linalg.norm(max_throw_direction):
-                throw_direction = throw_direction / np.linalg.norm(throw_direction) * np.linalg.norm(max_throw_direction)
+                throw_direction = (throw_direction / np.linalg.norm(throw_direction)) * np.linalg.norm(max_throw_direction)
             release_pose = pre_throw + throw_direction
 
             # --- 1. grasp block ---
-            self._controller.set_fast_mode(True)
+            self._controller.set_fast_mode(False)
             await self._follow_plan(above, orientation, self._gripper_open)
             await self._follow_plan(grasp, orientation, self._gripper_open)
 
@@ -280,27 +287,27 @@ class MassThrowTaskRunner(BaseSample):
 
             await asyncio.sleep(0.8)
             await self._follow_plan(above, orientation, self._gripper_closed)
-
             await self._follow_plan(center_pose, orientation, self._gripper_closed)
             await asyncio.sleep(0.8)
 
             # --- 2. plan a single motion from pre_throw to release_pose ---
+            self._controller.set_fast_mode(True)
             self._controller.reset()
-
             self._controller._make_new_plan(release_pose, orientation, finger_override=self._gripper_closed)
             
             if not self._controller._action_sequence:
                 print("[ERROR] Failed to generate throw motion.")
+                self._controller.set_fast_mode(False)
                 return
             
             seq = self._controller._action_sequence
 
             if m > 0.08:
-                release_frac = 0.4
+                release_frac = 0.48
             elif m <= 0.05:
-                release_frac = 0.3
+                release_frac = 0.6
             else:
-                release_frac = 0.5
+                release_frac = 0.55
 
             release_index = max(1, int(release_frac * len(seq)))
 
@@ -319,6 +326,8 @@ class MassThrowTaskRunner(BaseSample):
                     ArticulationAction(joint_positions=q)
                 )
                 await asyncio.sleep(1.0 / 160.0)
+            
+            self._controller.set_fast_mode(False)
 
             if not released:
                 q = self._franka.get_joint_positions()
@@ -326,7 +335,6 @@ class MassThrowTaskRunner(BaseSample):
                 q[self._finger_indices[1]] = self._gripper_open[1]
                 self._articulation_controller.apply_action(ArticulationAction(joint_positions=q))
 
-        self._controller.set_fast_mode(False)
         await self._follow_plan(above, orientation, self._gripper_open)
         await asyncio.sleep(0.5)
         for block in self.blocks:
