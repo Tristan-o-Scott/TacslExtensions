@@ -134,11 +134,6 @@ class MassThrowTaskRunner(BaseSample):
         await world.reset_async() 
         await asyncio.sleep(0.1)
 
-        # if not hasattr(self, "_init_franka_q"):
-        #     self._init_franka_q = None
-        # if not hasattr(self, "_init_block_poses"):
-        #     self._init_block_poses = []
-
         if self._controller:
             self._controller.reset()
             self._controller.set_fast_mode(False)
@@ -245,9 +240,9 @@ class MassThrowTaskRunner(BaseSample):
             dist_effort = float(np.clip(dist_effort, 0.6, 1.6))
 
             if m > 0.1:
-                effort = 1.1
+                effort = 1.15
             elif 0.065 < m <= 0.1:
-                effort = 1.3
+                effort = 1.25
             else:
                 effort = 1.2
 
@@ -290,7 +285,7 @@ class MassThrowTaskRunner(BaseSample):
             seq = self._controller._action_sequence
 
             if m > 0.08:
-                release_frac = 0.44
+                release_frac = 0.43
             elif m <= 0.05:
                 release_frac = 0.60
             else:
