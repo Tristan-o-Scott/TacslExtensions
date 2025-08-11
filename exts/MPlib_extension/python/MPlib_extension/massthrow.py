@@ -13,16 +13,16 @@ class MassThrowTaskRunner(BaseSample):
         super().__init__()
         self._controller = None
         self._articulation_controller = None
-        self._gripper_closed = np.array([0.001, 0.001])
-        self._gripper_open = np.array([0.04, 0.04])
-        self._ready_to_throw = False
-        self._finger_joint_names = ["panda_finger_joint1", "panda_finger_joint2"]
         self._finger_indices = None
         self._franka = None
         self._init_franka_q = None
         self._init_block_poses = [] 
         self.blocks = []
         self.block_masses = []
+        self._finger_joint_names = ["panda_finger_joint1", "panda_finger_joint2"]
+
+        self._gripper_closed = np.array([0.001, 0.001])
+        self._gripper_open = np.array([0.04, 0.04])
 
     def setup_scene(self):
         world = self.get_world()
@@ -34,7 +34,7 @@ class MassThrowTaskRunner(BaseSample):
         self._franka = scene.add(Franka(prim_path="/World/Franka", name="Franka"))
         self._init_franka_q = np.array([0.0, -0.6, 0.0, -2.4, 0.0, 1.8, 0.8] + self._gripper_open.tolist())
 
-        # add a target zone
+        # add a target zone (circular)
         self.target_radius = 0.15
         self.target_height = 0.01
         self.target_zone = scene.add(
@@ -63,10 +63,9 @@ class MassThrowTaskRunner(BaseSample):
         ]
 
         # max payload for franka is 3 kg, but blocks over or = 0.2 kg struggle
-        block_masses = [0.05, 0.08, 0.1] # kg
+        block_masses = [0.05, 0.08, 0.10] # kg
 
         def create_physics_material(stage, material_path, static_friction, dynamic_friction, restitution, color):
-            # Create a new Material prim at the given path
             material_prim = stage.DefinePrim(material_path, "PhysicsMaterial")
 
             # physical material properties
@@ -87,7 +86,6 @@ class MassThrowTaskRunner(BaseSample):
 
             # bind shader to material
             usd_material.CreateSurfaceOutput().ConnectToSource(shader_output)
-
             return material_prim
 
         def bind_material_to_prim(stage, prim, material_path):
@@ -95,8 +93,7 @@ class MassThrowTaskRunner(BaseSample):
             if not material_prim:
                 print(f"[ERROR] Material {material_path} does not exist.")
                 return
-            material = UsdShade.Material(material_prim)
-            UsdShade.MaterialBindingAPI(prim).Bind(material)   
+            UsdShade.MaterialBindingAPI(prim).Bind(UsdShade.Material(material_prim))   
 
         for i in range(len(block_masses)):
             mass = block_masses[i]
@@ -111,11 +108,11 @@ class MassThrowTaskRunner(BaseSample):
                 )
             )
 
-            material_prim_path = f"/World/Materials/HighFrictionBlock_{i+1}"
-            if not stage.GetPrimAtPath(material_prim_path):
+            material_path = f"/World/Materials/HighFrictionBlock_{i+1}"
+            if not stage.GetPrimAtPath(material_path):
                 create_physics_material(
                     stage,
-                    material_path=material_prim_path,
+                    material_path=material_path,
                     static_friction=2.5,
                     dynamic_friction=2.5,
                     restitution=0.0,
@@ -123,8 +120,7 @@ class MassThrowTaskRunner(BaseSample):
                 )
     
             cube_prim = world.stage.GetPrimAtPath(block.prim_path)
-            bind_material_to_prim(stage, cube_prim, material_prim_path)
-
+            bind_material_to_prim(stage, cube_prim, material_path)
             self.blocks.append(block) 
             self.block_masses.append(mass)    
 
@@ -132,35 +128,28 @@ class MassThrowTaskRunner(BaseSample):
 
     async def setup_pre_reset(self):
         self._controller.reset()
-        return        
 
     async def setup_post_reset(self):
         world = self.get_world()
         await world.reset_async() 
         await asyncio.sleep(0.1)
 
-        if not hasattr(self, "_init_franka_q"):
-            self._init_franka_q = None
-        if not hasattr(self, "_init_block_poses"):
-            self._init_block_poses = []
+        # if not hasattr(self, "_init_franka_q"):
+        #     self._init_franka_q = None
+        # if not hasattr(self, "_init_block_poses"):
+        #     self._init_block_poses = []
 
         if self._controller:
             self._controller.reset()
             self._controller.set_fast_mode(False)
 
-        # reset Franka to initial pose
-        if self._franka and self._init_franka_q is not None:
-            self._articulation_controller.apply_action(
-                ArticulationAction(joint_positions=self._init_franka_q.copy())
-            )
+        # reset Franka
+        if self._franka:
+            if self._init_franka_q is None:
+                self._init_franka_q = np.hstack([self.INIT_Q, self.GRIPPER_OPEN])
+            self._articulation_controller.apply_action(ArticulationAction(joint_positions=self._init_franka_q.copy()))
             await asyncio.sleep(0.05)
             self._franka.set_joint_velocities(np.zeros_like(self._franka.get_joint_velocities()))
-
-        if self._init_franka_q is None and self._franka is not None:
-            self._init_franka_q = np.array([0.0, -0.6, 0.0, -2.4, 0.0, 1.8, 0.8] + self._gripper_open.tolist())
-
-        if not self._init_block_poses and self.blocks:
-            self._init_block_poses = [blk.get_world_pose() for blk in self.blocks if blk is not None]
 
         # reset each block
         for block in self.blocks:
@@ -171,15 +160,13 @@ class MassThrowTaskRunner(BaseSample):
 
     def world_cleanup(self):
         self._controller = None
-        return
     
     def check_if_block_in_target(self, block):
         block_pos, _ = block.get_world_pose()
         target_pos, _ = self.target_zone.get_world_pose()
 
-        authoring_radius = self.target_radius
         sx, sy, _ = self.target_zone.get_local_scale()
-        r = float(authoring_radius * max(sx, sy))
+        r = float(self.target_radius * max(sx, sy))
 
         dx = float(block_pos[0] - target_pos[0])
         dy = float(block_pos[1] - target_pos[1])
@@ -303,9 +290,9 @@ class MassThrowTaskRunner(BaseSample):
             seq = self._controller._action_sequence
 
             if m > 0.08:
-                release_frac = 0.48
+                release_frac = 0.44
             elif m <= 0.05:
-                release_frac = 0.6
+                release_frac = 0.60
             else:
                 release_frac = 0.55
 
