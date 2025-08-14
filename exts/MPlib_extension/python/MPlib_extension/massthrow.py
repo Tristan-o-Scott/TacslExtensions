@@ -1,10 +1,11 @@
+from omni.isaac.core.objects import DynamicCuboid, DynamicCylinder
 from isaacsim.examples.interactive.base_sample import BaseSample
 from omni.isaac.core.utils.rotations import euler_angles_to_quat
+from pxr import UsdShade, UsdPhysics, Sdf, Gf, Usd, PhysxSchema
 from MPlib_extension.controller import FrankaMplibController
 from omni.isaac.core.utils.types import ArticulationAction
-from omni.isaac.core.objects import DynamicCuboid, DynamicCylinder
-from pxr import UsdShade, UsdPhysics, Sdf, Gf, Usd, UsdGeom, PhysxSchema
 from omni.isaac.franka import Franka
+
 import numpy as np
 import asyncio
 
@@ -69,18 +70,6 @@ class MassThrowTaskRunner(BaseSample):
         # max payload for franka is 3 kg, but blocks over or = 0.2 kg struggle
         block_masses = [0.05, 0.08, 0.10] # kg
 
-        self._block_specs = [
-            {
-                "name": f"block_{i}",
-                "pos": block_positions[i],
-                "color": block_colors[i],
-                "mass": float(block_masses[i]),
-                "scale": [0.04, 0.04, 0.04],
-                "material_path": f"/World/Materials/HighFrictionBlock_{i+1}",
-            }
-            for i in range(len(block_masses))
-        ] 
-
         def create_physics_material(stage, material_path, static_friction, dynamic_friction, restitution, color):
             material_prim = stage.DefinePrim(material_path, "PhysicsMaterial")
 
@@ -111,20 +100,21 @@ class MassThrowTaskRunner(BaseSample):
                 return
             UsdShade.MaterialBindingAPI(prim).Bind(UsdShade.Material(material_prim))   
 
-        for i in range(len(block_masses)):
-            mass = block_masses[i]
+        for idx, (mass, pos, color) in enumerate(
+                zip(block_masses, block_positions, block_colors), start=1):
+            name = f"block_{idx}"
             block = scene.add(
                 DynamicCuboid(
-                    prim_path=f"/World/block_{i}",
-                    name=f"block_{i}",
-                    position=block_positions[i],
+                    prim_path=f"/World/{name}",
+                    name=name,
+                    position=pos,
                     scale=np.array([0.04, 0.04, 0.04]),
-                    color=block_colors[i],
-                    mass=mass
+                    color=color,
+                    mass=mass,
                 )
             )
 
-            material_path = f"/World/Materials/HighFrictionBlock_{i+1}"
+            material_path = f"/World/Materials/HighFrictionBlock_{idx}"
             if not stage.GetPrimAtPath(material_path):
                 create_physics_material(
                     stage,
@@ -132,7 +122,7 @@ class MassThrowTaskRunner(BaseSample):
                     static_friction=2.5,
                     dynamic_friction=2.5,
                     restitution=0.0,
-                    color=block_colors[i]
+                    color=color
                 )
     
             cube_prim = world.stage.GetPrimAtPath(block.prim_path)
@@ -173,7 +163,7 @@ class MassThrowTaskRunner(BaseSample):
             pass
 
         self._ghosted.add(block.name)
-        print(f"[INFO] {block.name} is now a ghost (dynamic, no gravity, no collisions).")
+        print(f"[INFO] {block.name} is now dynamic, has no gravity, and has no collisions.")
 
 
     def _clear_block_ghost(self, block):
@@ -204,6 +194,11 @@ class MassThrowTaskRunner(BaseSample):
         world = self.get_world()
         await world.reset_async()
         await asyncio.sleep(0.1)
+
+        try:
+            await world.step_async()
+        except Exception:
+            pass
 
         if self._controller:
             self._controller.reset()
@@ -266,7 +261,8 @@ class MassThrowTaskRunner(BaseSample):
         # refresh valid cube references to avoid errors
         scene = self.get_world().scene
         self.blocks = [
-            b for b in (scene.get_object(f"block_{i}") for i in range(len(self.block_masses)))
+            b for b in (scene.get_object(f"block_{i}")
+                        for i in range(1, len(self.block_masses) + 1))
             if b is not None
         ]
 
@@ -278,13 +274,13 @@ class MassThrowTaskRunner(BaseSample):
             print("[ERROR] No blocks found to throw.")
             return
 
-        for i, block in enumerate(self.blocks):
+        for idx, block in enumerate(self.blocks, start=1):
             if block is None:
-                print(f"[WARNING] Block {i} not found in scene.")
+                print(f"[WARNING] Block {idx} not found in scene.")
                 continue
 
-            mass = self.block_masses[i]
-            print(f"\n[INFO] Throwing block {i} (mass={mass}).")
+            mass = self.block_masses[idx - 1]
+            print(f"\n[INFO] Throwing block {idx} (mass={mass}).")
 
             pos, _ = block.get_world_pose()
             height = block.get_local_scale()[2]
@@ -297,7 +293,7 @@ class MassThrowTaskRunner(BaseSample):
             elif m <= 0.05:
                 grasp = pos + np.array([0.0, 0.0, 0.5 * height + 0.085])
             else:
-                grasp = pos + np.array([0.0, 0.0, 0.5 * height + 0.09])
+                grasp = pos + np.array([0.0, 0.0, 0.5 * height + 0.090])
 
             above = grasp + np.array([0.0, 0.0, 0.1])
             orientation = euler_angles_to_quat(np.array([np.pi, 0, 0]))
@@ -305,7 +301,7 @@ class MassThrowTaskRunner(BaseSample):
             center_pose = np.array([0.45, 0.0, above[2]])
             pre_throw = center_pose
 
-            # cannot plan a path further than this distance
+            # cannot plan a path further than this distance (franka's constraints)
             max_throw_direction = np.array([0.32, 0.0, 0.17]) 
 
             target_pos, _ = self.target_zone.get_world_pose()
@@ -318,13 +314,13 @@ class MassThrowTaskRunner(BaseSample):
             elif 0.6 >= target_x:
                 dist_effort = 0.8
             else:
-                dist_effort = 0.95
+                dist_effort = 0.98
 
             # cap distance to range
             dist_effort = float(np.clip(dist_effort, 0.6, 1.6))
 
             if m > 0.1:
-                effort = 1.27
+                effort = 1.32
             elif 0.065 < m <= 0.1:
                 effort = 1.28
             else:
@@ -368,12 +364,13 @@ class MassThrowTaskRunner(BaseSample):
             
             seq = self._controller._action_sequence
 
+            # this is where, in the throwing trajectory, the franka arm lets go of the block
             if m > 0.08:
-                release_frac = 0.42
+                release_frac = 0.47
             elif m <= 0.05:
                 release_frac = 0.60
             else:
-                release_frac = 0.55
+                release_frac = 0.52
 
             release_index = max(1, int(release_frac * len(seq)))
 

@@ -12,13 +12,15 @@ from isaacsim.core.api.controllers.base_controller import BaseController
 # import MPlib
 # add Isaac Sim's Python site-packages dynamically
 this_file = Path(__file__).resolve()
-isaacsim_root = this_file
-while isaacsim_root.name != "isaacsim-4.5.0":
-    isaacsim_root = isaacsim_root.parent
-site_packages = isaacsim_root / "kit" / "python" / "lib" / f"python{sys.version_info.major}.{sys.version_info.minor}" / "site-packages"
-
-if site_packages.exists() and str(site_packages) not in sys.path:
-    sys.path.append(str(site_packages))
+isaacsim_root = None
+for p in this_file.parents:
+    if p.name.startswith("isaacsim-"):
+        isaacsim_root = p
+        break
+if isaacsim_root:
+    site_packages = isaacsim_root / "kit" / "python" / "lib" / f"python{sys.version_info.major}.{sys.version_info.minor}" / "site-packages"
+    if site_packages.exists() and str(site_packages) not in sys.path:
+        sys.path.append(str(site_packages))
 
 from mplib import Planner, Pose
 
@@ -49,7 +51,6 @@ class FrankaMplibController(BaseController):
         current_joints = self._robot.get_joint_positions() 
         finger_q = np.array(finger_override) if finger_override is not None else current_joints[7:]
     
-        # Use MPLib IK to find a goal joint config
         goal_pose = Pose(
             p=np.array(target_pos).reshape(3, 1),
             q=np.array(target_orn).reshape(4, 1)
@@ -68,7 +69,6 @@ class FrankaMplibController(BaseController):
         
         actions = []
 
-        # Linearly interpolate joint positions over time
         positions = plan_result["position"]
         num_points = len(positions)
 
@@ -76,9 +76,11 @@ class FrankaMplibController(BaseController):
             start = np.array(positions[i])
             end = np.array(positions[i + 1])
             step_size = 1
-            num_steps = 1 if self._fast_mode else max(2, min(20, int(np.ceil(np.linalg.norm(end - start) / step_size))))
+            num_steps = 1 if self._fast_mode else max(
+                2, min(20, int(np.ceil(np.linalg.norm(end - start) / step_size)))
+            )
 
-            for alpha in np.linspace(0, 1, num_steps):
+            for alpha in np.linspace(0, 1, num_steps, endpoint=True):
                 interp = (1 - alpha) * start + alpha * end
                 full_q = np.concatenate([interp, finger_q])
                 actions.append(ArticulationAction(joint_positions=full_q))
@@ -101,5 +103,3 @@ class FrankaMplibController(BaseController):
 
     def reset(self):
         self._action_sequence = []
-
-
