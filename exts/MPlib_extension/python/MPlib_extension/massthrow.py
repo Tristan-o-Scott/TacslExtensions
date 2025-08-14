@@ -3,7 +3,7 @@ from omni.isaac.core.utils.rotations import euler_angles_to_quat
 from MPlib_extension.controller import FrankaMplibController
 from omni.isaac.core.utils.types import ArticulationAction
 from omni.isaac.core.objects import DynamicCuboid, DynamicCylinder
-from pxr import UsdShade, UsdPhysics, Sdf, Gf
+from pxr import UsdShade, UsdPhysics, Sdf, Gf, Usd, UsdGeom, PhysxSchema
 from omni.isaac.franka import Franka
 import numpy as np
 import asyncio
@@ -20,6 +20,10 @@ class MassThrowTaskRunner(BaseSample):
         self.blocks = []
         self.block_masses = []
         self._finger_joint_names = ["panda_finger_joint1", "panda_finger_joint2"]
+
+        # toggle ghost mode, not required
+        self.ghost_blocks = True 
+        self._ghosted = set()
 
         self._gripper_closed = np.array([0.001, 0.001])
         self._gripper_open = np.array([0.04, 0.04])
@@ -64,6 +68,18 @@ class MassThrowTaskRunner(BaseSample):
 
         # max payload for franka is 3 kg, but blocks over or = 0.2 kg struggle
         block_masses = [0.05, 0.08, 0.10] # kg
+
+        self._block_specs = [
+            {
+                "name": f"block_{i}",
+                "pos": block_positions[i],
+                "color": block_colors[i],
+                "mass": float(block_masses[i]),
+                "scale": [0.04, 0.04, 0.04],
+                "material_path": f"/World/Materials/HighFrictionBlock_{i+1}",
+            }
+            for i in range(len(block_masses))
+        ] 
 
         def create_physics_material(stage, material_path, static_friction, dynamic_friction, restitution, color):
             material_prim = stage.DefinePrim(material_path, "PhysicsMaterial")
@@ -127,11 +143,66 @@ class MassThrowTaskRunner(BaseSample):
         self._init_block_poses = [blk.get_world_pose() for blk in self.blocks]
 
     async def setup_pre_reset(self):
-        self._controller.reset()
+        if self._controller:
+            self._controller.reset()
+
+    def _make_block_ghost(self, block):
+        stage = self.get_world().stage
+        prim = stage.GetPrimAtPath(block.prim_path)
+
+        try:
+            rb_px = PhysxSchema.PhysxRigidBodyAPI.Apply(prim)
+            rb_px.CreateDisableGravityAttr().Set(True)
+        except Exception:
+            attr = prim.GetAttribute("physxRigidBody:disableGravity")
+            if not attr:
+                attr = prim.CreateAttribute("physxRigidBody:disableGravity", Sdf.ValueTypeNames.Bool)
+            attr.Set(True)
+
+        try:
+            block.set_collision_enabled(False)
+        except Exception:
+            for p in Usd.PrimRange(prim):
+                if UsdPhysics.CollisionAPI.CanApply(p):
+                    UsdPhysics.CollisionAPI.Apply(p).CreateCollisionEnabledAttr().Set(False)
+
+        try:
+            block.set_linear_velocity(np.zeros(3))
+            block.set_angular_velocity(np.zeros(3))
+        except Exception:
+            pass
+
+        self._ghosted.add(block.name)
+        print(f"[INFO] {block.name} is now a ghost (dynamic, no gravity, no collisions).")
+
+
+    def _clear_block_ghost(self, block):
+        stage = self.get_world().stage
+        prim = stage.GetPrimAtPath(block.prim_path)
+
+        # re-enable gravity
+        try:
+            rb_px = PhysxSchema.PhysxRigidBodyAPI.Apply(prim)
+            rb_px.CreateDisableGravityAttr().Set(False)
+        except Exception:
+            attr = prim.GetAttribute("physxRigidBody:disableGravity")
+            if not attr:
+                attr = prim.CreateAttribute("physxRigidBody:disableGravity", Sdf.ValueTypeNames.Bool)
+            attr.Set(False)
+
+        # re-enable collisions
+        try:
+            block.set_collision_enabled(True)
+        except Exception:
+            for p in Usd.PrimRange(prim):
+                if UsdPhysics.CollisionAPI.CanApply(p):
+                    UsdPhysics.CollisionAPI.Apply(p).CreateCollisionEnabledAttr().Set(True)
+
+        self._ghosted.discard(block.name)
 
     async def setup_post_reset(self):
         world = self.get_world()
-        await world.reset_async() 
+        await world.reset_async()
         await asyncio.sleep(0.1)
 
         if self._controller:
@@ -142,16 +213,27 @@ class MassThrowTaskRunner(BaseSample):
         if self._franka:
             if self._init_franka_q is None:
                 self._init_franka_q = np.hstack([self.INIT_Q, self.GRIPPER_OPEN])
-            self._articulation_controller.apply_action(ArticulationAction(joint_positions=self._init_franka_q.copy()))
-            await asyncio.sleep(0.05)
-            self._franka.set_joint_velocities(np.zeros_like(self._franka.get_joint_velocities()))
+            self._articulation_controller.apply_action(
+                ArticulationAction(joint_positions=self._init_franka_q.copy())
+            )
 
-        # reset each block
-        for block in self.blocks:
-            block.set_linear_velocity(np.zeros(3))
-            block.set_angular_velocity(np.zeros(3))
+        for i, block in enumerate(self.blocks):
+            self._clear_block_ghost(block)
 
-        await asyncio.sleep(0.1)
+            init_pos, init_rot = self._init_block_poses[i]
+            try:
+                block.set_world_pose(init_pos, init_rot)
+            except Exception:
+                block.set_world_pose(np.array(init_pos), None)
+
+            try:
+                block.set_linear_velocity(np.zeros(3))
+                block.set_angular_velocity(np.zeros(3))
+            except Exception:
+                pass
+
+        self._ghosted.clear()
+        await asyncio.sleep(0.05)
 
     def world_cleanup(self):
         self._controller = None
@@ -169,6 +251,8 @@ class MassThrowTaskRunner(BaseSample):
 
         if in_target:
             print(f"[SUCCESS] {block.name} landed in target.")
+            if self.ghost_blocks and (block.name not in self._ghosted):
+                self._make_block_ghost(block)
             return True
         else:
             print(f"[MISS] {block.name} missed the target.")
@@ -196,11 +280,11 @@ class MassThrowTaskRunner(BaseSample):
 
         for i, block in enumerate(self.blocks):
             if block is None:
-                print(f"[WARN] Block {i} not found in scene.")
+                print(f"[WARNING] Block {i} not found in scene.")
                 continue
 
             mass = self.block_masses[i]
-            print(f"\n[INFO] Throwing block {i} (mass={mass})")
+            print(f"\n[INFO] Throwing block {i} (mass={mass}).")
 
             pos, _ = block.get_world_pose()
             height = block.get_local_scale()[2]
@@ -231,7 +315,7 @@ class MassThrowTaskRunner(BaseSample):
 
             if 0.6 < target_x < 0.8:
                 dist_effort = 0.9
-            elif target_x <= 0.6:
+            elif 0.6 >= target_x:
                 dist_effort = 0.8
             else:
                 dist_effort = 0.95
@@ -240,11 +324,11 @@ class MassThrowTaskRunner(BaseSample):
             dist_effort = float(np.clip(dist_effort, 0.6, 1.6))
 
             if m > 0.1:
-                effort = 1.15
+                effort = 1.27
             elif 0.065 < m <= 0.1:
-                effort = 1.25
+                effort = 1.28
             else:
-                effort = 1.2
+                effort = 1.30
 
             mass_scale = effort * dist_effort * target_scale
 
@@ -285,7 +369,7 @@ class MassThrowTaskRunner(BaseSample):
             seq = self._controller._action_sequence
 
             if m > 0.08:
-                release_frac = 0.43
+                release_frac = 0.42
             elif m <= 0.05:
                 release_frac = 0.60
             else:
@@ -317,10 +401,11 @@ class MassThrowTaskRunner(BaseSample):
                 q[self._finger_indices[1]] = self._gripper_open[1]
                 self._articulation_controller.apply_action(ArticulationAction(joint_positions=q))
 
+            await asyncio.sleep(0.5)
+            self.check_if_block_in_target(block)
+
         await self._follow_plan(above, orientation, self._gripper_open)
         await asyncio.sleep(0.5)
-        for block in self.blocks:
-            self.check_if_block_in_target(block)
         await asyncio.sleep(1.0)
 
     async def _follow_plan(self, pos, orn, fingers):
