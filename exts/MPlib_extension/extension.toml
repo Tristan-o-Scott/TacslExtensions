@@ -12,6 +12,3 @@ path = "python"
 
 [dependencies]
 "isaacsim.examples.interactive" = "*"
-
-[python]
-requiredModules = ["mplib"]

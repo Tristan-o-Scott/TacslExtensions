@@ -76,11 +76,9 @@ class FrankaMplibController(BaseController):
             start = np.array(positions[i])
             end = np.array(positions[i + 1])
             step_size = 1
-            num_steps = 1 if self._fast_mode else max(
-                2, min(20, int(np.ceil(np.linalg.norm(end - start) / step_size)))
-            )
+            num_steps = 1 if self._fast_mode else max(2, min(20, int(np.ceil(np.linalg.norm(end - start) / step_size))))
 
-            for alpha in np.linspace(0, 1, num_steps, endpoint=True):
+            for alpha in np.linspace(0, 1, num_steps):
                 interp = (1 - alpha) * start + alpha * end
                 full_q = np.concatenate([interp, finger_q])
                 actions.append(ArticulationAction(joint_positions=full_q))
@@ -103,3 +101,4 @@ class FrankaMplibController(BaseController):
 
     def reset(self):
         self._action_sequence = []
+

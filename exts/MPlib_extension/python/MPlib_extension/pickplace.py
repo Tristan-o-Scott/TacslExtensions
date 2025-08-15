@@ -8,7 +8,7 @@ from MPlib_extension.task import FrankaTask
 import numpy as np
 import asyncio
 
-class MyTaskRunner(BaseSample):
+class PickPlaceTaskRunner(BaseSample):
     def __init__(self) -> None:
         super().__init__()
         self._controller = None
